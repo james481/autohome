@@ -1,0 +1,6 @@
+.DS_Store
+.rpt*
+*.kicad_pcb-bak
+*.bak
+*.FCStd1
+_site
