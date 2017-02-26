@@ -20,6 +20,9 @@
 /*
  * Configuration
  */
+#define LOCK_DISTANCE 40
+#define LOCK_TOLERENCE 10
+
 #define DEBUG true
 #define DEBUGOUT Serial
 
@@ -28,102 +31,388 @@
 #define GPIO_DOOR_SWITCH 4
 #define GPIO_LED 5
 
+#define SLEEP_PERIOD 60
 #define MQTT_TOPIC_LOCK "/home/doors/front/lock"
 #define MQTT_TOPIC_DOOR "/home/doors/front/state"
+#define MQTT_RETRY 5
+#define WIFI_RETRY 10
 
 #define VL6180X_ADDRESS 0x29
+
+/*
+ * Lock / Door States
+ */
+enum LockState: uint8_t {
+  unlocked = 0,
+  locked   = 1,
+  other    = 2,
+};
+
+enum DoorState: uint8_t {
+  open   = 0,
+  closed = 1,
+};
+
+/*
+ * VL6180x Lock class
+ */
+class VL6180Lock: public VL6180x
+{
+  public:
+    VL6180Lock(uint8_t address, uint8_t distance, uint8_t threshold): VL6180x(address) {
+      _i2caddress = address;
+      _distance = distance;
+      _threshold = threshold;
+    };
+
+    // Check if the sensor has already been initialized / is operating.
+    bool sensorRunning(void) {
+      uint8_t regData = 255;
+      regData = VL6180x_getRegister(VL6180X_SYSTEM_FRESH_OUT_OF_RESET);
+      return(regData == 0);
+    };
+
+    // Init sensor settings and configure for discreet operation via interrupts.
+    void sensorSettings(void) {
+      if (sensorRunning()) {
+        return;
+      }
+
+      VL6180xInit();
+
+      // Configure disable interrupts.
+      VL6180x_setRegister(VL6180X_SYSTEM_INTERRUPT_CONFIG_GPIO, 0x0);
+
+      // Configure GPIO1 for interrupt / active low polarity.
+      VL6180x_setRegister(VL6180X_SYSTEM_MODE_GPIO1, 0x10);
+
+      // Sensor calibration and temperature
+      VL6180x_setRegister(VL6180X_READOUT_AVERAGING_SAMPLE_PERIOD, 0x30);
+      VL6180x_setRegister(VL6180X_SYSALS_ANALOGUE_GAIN, 0x46);
+      VL6180x_setRegister(VL6180X_SYSRANGE_VHV_REPEAT_RATE, 0xFF);
+      VL6180x_setRegister(VL6180X_SYSALS_INTEGRATION_PERIOD, 0x63);
+      VL6180x_setRegister(VL6180X_SYSRANGE_VHV_RECALIBRATE, 0x01);
+      VL6180x_setRegister(VL6180X_SYSRANGE_RANGE_CHECK_ENABLES, 0x11);
+      VL6180x_setRegister16bit(VL6180X_SYSRANGE_EARLY_CONVERGENCE_ESTIMATE, 0x7B);
+      VL6180x_setRegister(VL6180X_READOUT_AVERAGING_SAMPLE_PERIOD, 0x30);
+
+      // Continuous ranging delay period (1 = 10ms) and timeout (1 = 1ms)
+      VL6180x_setRegister(VL6180X_SYSRANGE_INTERMEASUREMENT_PERIOD, 0x64);
+      VL6180x_setRegister(VL6180X_SYSRANGE_MAX_CONVERGENCE_TIME, 0x32);
+
+      // Continuous ranging window min / max distance
+      VL6180x_setRegister(VL6180X_SYSRANGE_THRESH_LOW, _distance + _threshold);
+      VL6180x_setRegister(VL6180X_SYSRANGE_THRESH_HIGH, _distance + _threshold);
+
+      // History buffering
+      VL6180x_setRegister(VL6180X_SYSTEM_HISTORY_CTRL, 0x05);
+
+      // Reset flag
+      VL6180x_setRegister(VL6180X_SYSTEM_FRESH_OUT_OF_RESET, 0x0);
+    };
+
+    // Get the last distance result from history buffer and
+    // clear interrupts.
+    uint8_t getLastDistance(void) {
+      uint8_t regData;
+      regData = VL6180x_getRegister(VL6180X_RESULT_HISTORY_BUFFER);
+      VL6180x_setRegister(VL6180X_SYSTEM_INTERRUPT_CLEAR, 0x07);
+      return(regData);
+    };
+
+    // Get current status / interrupt config
+    LockState getConfigState(void) {
+      uint8_t intConfig;
+      LockState lockState;
+      intConfig = VL6180x_getRegister(VL6180X_SYSTEM_INTERRUPT_CONFIG_GPIO);
+
+      if (intConfig == 0x02) {
+        lockState = locked;
+      } else if (intConfig == 0x01) {
+        lockState = unlocked;
+      } else {
+        lockState = other;
+      }
+
+      return(lockState);
+    };
+
+    // Config to monitor a new status change state.
+    void setConfigState(LockState newState) {
+      uint8_t regData;
+
+      if (newState == getConfigState()) {
+        return;
+      }
+
+      // Stop current measurements, if in continuous mode.
+      regData = VL6180x_getRegister(VL6180X_SYSRANGE_START);
+      if (regData == 0x02) {
+        VL6180x_setRegister(VL6180X_SYSRANGE_START, 0x01);
+      }
+
+      // Set interrupts to watch for lock / unlock distance change.
+      switch (newState) {
+        case locked:
+          regData = 0x02;
+          break;
+        case unlocked:
+          regData = 0x01;
+          break;
+        default:
+          regData = 0x0;
+      }
+
+      VL6180x_setRegister(VL6180X_SYSTEM_INTERRUPT_CONFIG_GPIO, regData);
+
+      // Start continuous measurement.
+      VL6180x_setRegister(VL6180X_SYSRANGE_START, 0x03);
+    };
+
+  private:
+    int _i2caddress;
+    uint8_t _distance, _threshold;
+
+    uint8_t VL6180x_getRegister(uint16_t registerAddr)
+    {
+      uint8_t data;
+
+      Wire.beginTransmission(_i2caddress);
+      Wire.write((registerAddr >> 8) & 0xFF);
+      Wire.write(registerAddr & 0xFF);
+      Wire.endTransmission(false);
+      Wire.requestFrom(_i2caddress, 1);
+      data = Wire.read();
+
+      return data;
+    }
+
+    uint16_t VL6180x_getRegister16bit(uint16_t registerAddr)
+    {
+      uint8_t data_low;
+      uint8_t data_high;
+      uint16_t data;
+
+      Wire.beginTransmission(_i2caddress);
+      Wire.write((registerAddr >> 8) & 0xFF);
+      Wire.write(registerAddr & 0xFF);
+      Wire.endTransmission(false);
+
+      Wire.requestFrom(_i2caddress, 2);
+      data_high = Wire.read();
+      data_low = Wire.read();
+      data = (data_high << 8) | data_low;
+
+      return data;
+    }
+
+    void VL6180x_setRegister(uint16_t registerAddr, uint8_t data)
+    {
+      Wire.beginTransmission(_i2caddress);
+      Wire.write((registerAddr >> 8) & 0xFF);
+      Wire.write(registerAddr & 0xFF);
+      Wire.write(data);
+      Wire.endTransmission();
+    }
+
+    void VL6180x_setRegister16bit(uint16_t registerAddr, uint16_t data)
+    {
+      Wire.beginTransmission(_i2caddress);
+      Wire.write((registerAddr >> 8) & 0xFF);
+      Wire.write(registerAddr & 0xFF);
+      uint8_t temp;
+      temp = (data >> 8) & 0xff;
+      Wire.write(temp);
+      temp = data & 0xff;
+      Wire.write(temp);
+      Wire.endTransmission();
+    }
+};
 
 WiFiClient espClient;
 PubSubClient client(espClient);
 long lastMsg = 0;
 char msg[50];
-int value = 0;
 
-VL6180xIdentification identification;
-VL6180x sensor(VL6180X_ADDRESS);
+VL6180Lock sensor(VL6180X_ADDRESS, LOCK_DISTANCE, LOCK_TOLERENCE);
 
+/*
+ * Setup / Main Loop
+ */
 void setup() {
+  uint8_t distance;
+  LockState lockState;
+  DoorState doorState;
 
 #if DEBUG
   DEBUGOUT.begin(115200);
   delay(1000);
 #endif
 
+  // Setup GPIO.
   pinMode(GPIO_LED, OUTPUT);
   pinMode(GPIO_DOOR_SWITCH, INPUT_PULLUP);
-  setup_wifi();
+
   Wire.begin();
   delay(100);
 
-  if (sensor.VL6180xInit() != 0){
-    DEBUGOUT.println("FAILED TO INITALIZE");
-  };
+  // Get current lock state from VL6180.
+  if (!sensor.sensorRunning()) {
 
-  sensor.VL6180xDefautSettings();
-  delay(1000);
+#if DEBUG
+    DEBUGOUT.println("Configuring VL6180x.");
+#endif
 
-  client.setServer(MQTT_SERVER, MQTT_PORT);
+    sensor.sensorSettings();
+    distance = sensor.getDistance();
+    lockState = getLockState(distance);
+    // sensor.setConfigState(lockState);
+  } else {
+    distance = sensor.getLastDistance();
+    lockState = getLockState(distance);
+
+#if DEBUG
+    if (lockState != sensor.getConfigState()) {
+      DEBUGOUT.print("New Lock state detected: ");
+      DEBUGOUT.println(lockState);
+    }
+#endif
+
+  }
+
+  // Get current door switch state.
+  doorState = static_cast<DoorState>(digitalRead(GPIO_DOOR_SWITCH));
+
+#if DEBUG
+  DEBUGOUT.print("Door state detected: ");
+  DEBUGOUT.println(doorState);
+#endif
+
+  sendStates(lockState, doorState);
+  sensor.setConfigState(lockState);
+
+  // Go to sleep (or delay and reset for debug).
+#if DEBUG
+  DEBUGOUT.println("Sleeping / resetting now.");
+  delay(5000);
+  ESP.restart();
+#else
+  ESP.deepSleep(SLEEP_PERIOD * 1000000);
+#endif
 }
 
-void setup_wifi() {
+/*
+ * Determine the lock state from a sensor distance in mm.
+ */
+LockState getLockState(uint8_t distance) {
+  LockState lockState;
 
-  delay(10);
-  // We start by connecting to a WiFi network
+  if (distance > (LOCK_DISTANCE + LOCK_TOLERENCE)) {
+    // Door is unlocked.
+    lockState = unlocked;
+  } else if (distance < (LOCK_DISTANCE - LOCK_TOLERENCE)) {
+    lockState = locked;
+  } else {
+    lockState = other;
+  }
+
+  return(lockState);
+}
+
+/*
+ * Send the current lock / door states to MQTT server.
+ */
+void sendStates(LockState lockState, DoorState doorState) {
+  uint8_t retries = 0;
+
+  if (!setupWifi()) {
+    return;
+  }
+
+  client.setServer(MQTT_SERVER, MQTT_PORT);
+
+  // Loop until we're connected (or timeout).
+  while ((!client.connected()) && (retries < MQTT_RETRY)) {
+
+#if DEBUG
+    DEBUGOUT.print("Attempting MQTT connection... ");
+#endif
+
+    // Attempt to connect
+    if (client.connect(MQTT_CLIENT_ID, MQTT_CLIENT_USER, MQTT_CLIENT_PASS)) {
+
+#if DEBUG
+      DEBUGOUT.println("connected.");
+#endif
+
+      // Once connected, publish an announcement...
+      snprintf(msg, 10, "%d", lockState);
+      client.publish(MQTT_TOPIC_LOCK, msg);
+      snprintf(msg, 10, "%d", doorState);
+      client.publish(MQTT_TOPIC_DOOR, msg);
+
+    } else {
+
+#if DEBUG
+      DEBUGOUT.print("failed, rc=");
+      DEBUGOUT.println(client.state());
+#endif
+      // Wait before retrying.
+      retries++;
+      delay(2000);
+    }
+  }
+
+  client.loop();
+}
+
+/*
+ * Setup the Wifi network connection.
+ */
+bool setupWifi() {
+  uint8_t retries = 0;
+
+#if DEBUG
   DEBUGOUT.println();
   DEBUGOUT.print("Connecting to ");
   DEBUGOUT.println(WIFI_AP);
+#endif
 
   WiFi.begin(WIFI_AP, WIFI_PASS);
 
-  while (WiFi.status() != WL_CONNECTED) {
+  while ((WiFi.status() != WL_CONNECTED) && (retries < WIFI_RETRY)) {
     delay(500);
+    retries++;
+
+#if DEBUG
     DEBUGOUT.print(".");
+#endif
+
   }
 
+  if (retries >= WIFI_RETRY) {
+
+#if DEBUG
+    DEBUGOUT.println("");
+    DEBUGOUT.println("Unable to connect to WiFi.");
+#endif
+
+    return(false);
+  }
+
+#if DEBUG
   DEBUGOUT.println("");
   DEBUGOUT.println("WiFi connected");
   DEBUGOUT.println("IP address: ");
   DEBUGOUT.println(WiFi.localIP());
+#endif
+
+  return(true);
 }
 
-void reconnect() {
-  // Loop until we're reconnected
-  while (!client.connected()) {
-    DEBUGOUT.print("Attempting MQTT connection...");
-    // Attempt to connect
-    if (client.connect(MQTT_CLIENT_ID, MQTT_CLIENT_USER, MQTT_CLIENT_PASS)) {
-      DEBUGOUT.println("connected");
-      // Once connected, publish an announcement...
-      snprintf(msg, 10, "%d", sensor.getDistance());
-      client.publish(MQTT_TOPIC_LOCK, msg);
-      snprintf(msg, 10, "%d", digitalRead(GPIO_DOOR_SWITCH));
-      client.publish(MQTT_TOPIC_DOOR, msg);
-    } else {
-      DEBUGOUT.print("failed, rc=");
-      DEBUGOUT.print(client.state());
-      DEBUGOUT.println(" try again in 5 seconds");
-      // Wait 5 seconds before retrying
-      delay(5000);
-    }
-  }
-}
-void loop() {
+/*
+ * Empty loop (sleep / reset during setup).
+ */
+void loop() { }
 
-  if (!client.connected()) {
-    reconnect();
-  }
-  client.loop();
-
-  long now = millis();
-  if (now - lastMsg > 2000) {
-    digitalWrite(GPIO_LED, HIGH);
-    lastMsg = now;
-    snprintf(msg, 4, "%d", sensor.getDistance());
-    client.publish(MQTT_TOPIC_LOCK, msg);
-    snprintf(msg, 10, "%d", digitalRead(GPIO_DOOR_SWITCH));
-    client.publish(MQTT_TOPIC_DOOR, msg);
-    delay(250);
-    digitalWrite(GPIO_LED, LOW);
-  }
-}
 // vim:cin:ai:sts=2 sw=2 ft=cpp
