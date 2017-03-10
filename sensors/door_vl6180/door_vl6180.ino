@@ -25,6 +25,7 @@
 
 #define DEBUG true
 #define DEBUGOUT Serial
+#define DEBUG_NOSLEEP false
 
 #define GPIO_VL6180_IO0 13
 #define GPIO_VL6180_IO1 12
@@ -247,6 +248,7 @@ void setup() {
 #if DEBUG
   DEBUGOUT.begin(115200);
   delay(1000);
+  DEBUGOUT.println("ESP8266 powering up.");
 #endif
 
   // Setup GPIO.
@@ -266,19 +268,16 @@ void setup() {
     sensor.sensorSettings();
     distance = sensor.getDistance();
     lockState = getLockState(distance);
-    // sensor.setConfigState(lockState);
   } else {
     distance = sensor.getLastDistance();
     lockState = getLockState(distance);
 
-#if DEBUG
-    if (lockState != sensor.getConfigState()) {
-      DEBUGOUT.print("New Lock state detected: ");
-      DEBUGOUT.println(lockState);
-    }
-#endif
-
   }
+
+#if DEBUG
+  DEBUGOUT.print("New Lock state detected: ");
+  DEBUGOUT.println(lockState);
+#endif
 
   // Get current door switch state.
   doorState = static_cast<DoorState>(digitalRead(GPIO_DOOR_SWITCH));
@@ -291,9 +290,14 @@ void setup() {
   sendStates(lockState, doorState);
   sensor.setConfigState(lockState);
 
-  // Go to sleep (or delay and reset for debug).
+  // Go to sleep.
 #if DEBUG
-  DEBUGOUT.println("Sleeping / resetting now.");
+  DEBUGOUT.println("ESP8266 entering low power mode.");
+  delay(100);
+#endif
+
+#if DEBUG_NOSLEEP
+  DEBUGOUT.println("Rebooting in 5 seconds.");
   delay(5000);
   ESP.restart();
 #else
@@ -376,6 +380,14 @@ bool setupWifi() {
   DEBUGOUT.println();
   DEBUGOUT.print("Connecting to ");
   DEBUGOUT.println(WIFI_AP);
+#endif
+
+#if defined(WIFI_IP) && defined(WIFI_GW) && defined(WIFI_SN)
+  // Set static IP / routing.
+  IPAddress wifiip(WIFI_IP);
+  IPAddress wifigw(WIFI_GW);
+  IPAddress wifisn(WIFI_SN);
+  WiFi.config(wifiip, wifigw, wifisn);
 #endif
 
   WiFi.begin(WIFI_AP, WIFI_PASS);
