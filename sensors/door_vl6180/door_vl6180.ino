@@ -27,16 +27,14 @@
 #define DEBUGOUT Serial
 #define DEBUG_NOSLEEP false
 
-#define GPIO_VL6180_IO0 13
-#define GPIO_VL6180_IO1 12
 #define GPIO_DOOR_SWITCH 4
 #define GPIO_LED 5
 
 #define SLEEP_PERIOD 60
 #define MQTT_TOPIC_LOCK "/home/doors/front/lock"
 #define MQTT_TOPIC_DOOR "/home/doors/front/state"
-#define MQTT_RETRY 5
-#define WIFI_RETRY 10
+#define MQTT_RETRY 10
+#define WIFI_RETRY 20
 
 #define VL6180X_ADDRESS 0x29
 
@@ -252,8 +250,7 @@ void setup() {
 #endif
 
   // Setup GPIO.
-  pinMode(GPIO_LED, OUTPUT);
-  pinMode(GPIO_DOOR_SWITCH, INPUT_PULLUP);
+  pinMode(GPIO_DOOR_SWITCH, INPUT);
 
   Wire.begin();
   delay(100);
@@ -276,7 +273,9 @@ void setup() {
 
 #if DEBUG
   DEBUGOUT.print("New Lock state detected: ");
-  DEBUGOUT.println(lockState);
+  DEBUGOUT.print(lockState);
+  DEBUGOUT.print(" from distance: ");
+  DEBUGOUT.println(distance);
 #endif
 
   // Get current door switch state.
@@ -315,9 +314,9 @@ LockState getLockState(uint8_t distance) {
     // Door is unlocked.
     lockState = unlocked;
   } else if (distance < (LOCK_DISTANCE - LOCK_TOLERENCE)) {
-    lockState = locked;
-  } else {
     lockState = other;
+  } else {
+    lockState = locked;
   }
 
   return(lockState);
