@@ -29,6 +29,7 @@
 
 #define GPIO_DOOR_SWITCH 4
 #define GPIO_LED 5
+#define GPIO_ENABLE_LED true
 
 #define SLEEP_PERIOD 60
 #define MQTT_TOPIC_LOCK "/home/doors/front/lock"
@@ -82,8 +83,8 @@ class VL6180Lock: public VL6180x
       // Configure disable interrupts.
       VL6180x_setRegister(VL6180X_SYSTEM_INTERRUPT_CONFIG_GPIO, 0x0);
 
-      // Configure GPIO1 for interrupt / active low polarity.
-      VL6180x_setRegister(VL6180X_SYSTEM_MODE_GPIO1, 0x10);
+      // Configure GPIO0 for interrupt / active high polarity.
+      VL6180x_setRegister(VL6180X_SYSTEM_MODE_GPIO0, 0x30);
 
       // Sensor calibration and temperature
       VL6180x_setRegister(VL6180X_READOUT_AVERAGING_SAMPLE_PERIOD, 0x30);
@@ -99,15 +100,14 @@ class VL6180Lock: public VL6180x
       VL6180x_setRegister(VL6180X_SYSRANGE_INTERMEASUREMENT_PERIOD, 0x64);
       VL6180x_setRegister(VL6180X_SYSRANGE_MAX_CONVERGENCE_TIME, 0x32);
 
-      // Continuous ranging window min / max distance
-      VL6180x_setRegister(VL6180X_SYSRANGE_THRESH_LOW, _distance + _threshold);
-      VL6180x_setRegister(VL6180X_SYSRANGE_THRESH_HIGH, _distance + _threshold);
-
       // History buffering
       VL6180x_setRegister(VL6180X_SYSTEM_HISTORY_CTRL, 0x05);
 
       // Reset flag
       VL6180x_setRegister(VL6180X_SYSTEM_FRESH_OUT_OF_RESET, 0x0);
+
+      // Start continuous measurement.
+      VL6180x_setRegister(VL6180X_SYSRANGE_START, 0x03);
     };
 
     // Get the last distance result from history buffer and
@@ -125,7 +125,7 @@ class VL6180Lock: public VL6180x
       LockState lockState;
       intConfig = VL6180x_getRegister(VL6180X_SYSTEM_INTERRUPT_CONFIG_GPIO);
 
-      if (intConfig == 0x02) {
+      if (intConfig == 0x03) {
         lockState = locked;
       } else if (intConfig == 0x01) {
         lockState = unlocked;
@@ -138,31 +138,46 @@ class VL6180Lock: public VL6180x
 
     // Config to monitor a new status change state.
     void setConfigState(LockState newState) {
-      uint8_t regData;
+      uint8_t intConfig, threshL, threshH;
 
       if (newState == getConfigState()) {
+        VL6180x_setRegister(VL6180X_SYSTEM_INTERRUPT_CLEAR, 0x07);
         return;
       }
 
-      // Stop current measurements, if in continuous mode.
-      regData = VL6180x_getRegister(VL6180X_SYSRANGE_START);
-      if (regData == 0x02) {
-        VL6180x_setRegister(VL6180X_SYSRANGE_START, 0x01);
-      }
+      // Stop continuous measurement.
+      VL6180x_setRegister(VL6180X_SYSRANGE_START, 0x03);
 
       // Set interrupts to watch for lock / unlock distance change.
       switch (newState) {
         case locked:
-          regData = 0x02;
+          // Watch for change outside locked (+/- tolerence) window
+          intConfig = 0x03;
+          threshL = _distance - _threshold;
+          threshH = _distance + _threshold;
           break;
         case unlocked:
-          regData = 0x01;
+          // Watch for change to less than locked + tolerence
+          intConfig = 0x01;
+          threshL = _distance + _threshold;
+          threshH = 255;
           break;
+        case other:
         default:
-          regData = 0x0;
+          // Watch for change to greater than locked - tolerence
+          intConfig = 0x02;
+          threshL = 0;
+          threshH = _distance + _threshold;
       }
 
-      VL6180x_setRegister(VL6180X_SYSTEM_INTERRUPT_CONFIG_GPIO, regData);
+      delay(10);
+
+      VL6180x_setRegister(VL6180X_SYSRANGE_THRESH_LOW, threshL);
+      VL6180x_setRegister(VL6180X_SYSRANGE_THRESH_HIGH, threshH);
+      VL6180x_setRegister(VL6180X_SYSTEM_INTERRUPT_CONFIG_GPIO, intConfig);
+      VL6180x_setRegister(VL6180X_SYSTEM_INTERRUPT_CLEAR, 0x07);
+
+      delay(10);
 
       // Start continuous measurement.
       VL6180x_setRegister(VL6180X_SYSRANGE_START, 0x03);
@@ -252,6 +267,11 @@ void setup() {
   // Setup GPIO.
   pinMode(GPIO_DOOR_SWITCH, INPUT);
 
+#if GPIO_ENABLE_LED
+  pinMode(GPIO_LED, OUTPUT);
+  digitalWrite(GPIO_LED, LOW);
+#endif
+
   Wire.begin();
   delay(100);
 
@@ -262,14 +282,14 @@ void setup() {
     DEBUGOUT.println("Configuring VL6180x.");
 #endif
 
+    // Configure sensor and start continuous measurement, then
+    // wait a bit for it to start sampling.
     sensor.sensorSettings();
-    distance = sensor.getDistance();
-    lockState = getLockState(distance);
-  } else {
-    distance = sensor.getLastDistance();
-    lockState = getLockState(distance);
-
+    delay(100);
   }
+
+  distance = sensor.getLastDistance();
+  lockState = getLockState(distance);
 
 #if DEBUG
   DEBUGOUT.print("New Lock state detected: ");
@@ -287,12 +307,11 @@ void setup() {
 #endif
 
   sendStates(lockState, doorState);
-  sensor.setConfigState(lockState);
+  sensor.setConfigState(getLockState(sensor.getLastDistance()));
 
   // Go to sleep.
 #if DEBUG
   DEBUGOUT.println("ESP8266 entering low power mode.");
-  delay(100);
 #endif
 
 #if DEBUG_NOSLEEP
@@ -392,13 +411,21 @@ bool setupWifi() {
   WiFi.begin(WIFI_AP, WIFI_PASS);
 
   while ((WiFi.status() != WL_CONNECTED) && (retries < WIFI_RETRY)) {
+
+#if GPIO_ENABLE_LED
+    digitalWrite(GPIO_LED, HIGH);
+    delay(250);
+    digitalWrite(GPIO_LED, LOW);
+    delay(250);
+#else
     delay(500);
-    retries++;
+#endif
 
 #if DEBUG
     DEBUGOUT.print(".");
 #endif
 
+    retries++;
   }
 
   if (retries >= WIFI_RETRY) {
@@ -406,6 +433,17 @@ bool setupWifi() {
 #if DEBUG
     DEBUGOUT.println("");
     DEBUGOUT.println("Unable to connect to WiFi.");
+#endif
+
+#if GPIO_ENABLE_LED
+    uint8_t flash = 0;
+    while (flash <= 10) {
+      delay(25);
+      digitalWrite(GPIO_LED, HIGH);
+      delay(25);
+      digitalWrite(GPIO_LED, LOW);
+      flash++;
+    }
 #endif
 
     return(false);
