@@ -20,10 +20,10 @@
 /*
  * Configuration
  */
-#define LOCK_DISTANCE 40
+#define LOCK_DISTANCE 75
 #define LOCK_TOLERENCE 10
 
-#define DEBUG true
+#define DEBUG false
 #define DEBUGOUT Serial
 #define DEBUG_NOSLEEP false
 
@@ -31,7 +31,8 @@
 #define GPIO_LED 5
 #define GPIO_ENABLE_LED true
 
-#define SLEEP_PERIOD 60
+#define SLEEP_DELAY 500
+#define SLEEP_PERIOD 600
 #define MQTT_TOPIC_LOCK "/home/doors/front/lock"
 #define MQTT_TOPIC_DOOR "/home/doors/front/state"
 #define MQTT_RETRY 10
@@ -97,7 +98,7 @@ class VL6180Lock: public VL6180x
       VL6180x_setRegister(VL6180X_READOUT_AVERAGING_SAMPLE_PERIOD, 0x30);
 
       // Continuous ranging delay period (1 = 10ms) and timeout (1 = 1ms)
-      VL6180x_setRegister(VL6180X_SYSRANGE_INTERMEASUREMENT_PERIOD, 0x64);
+      VL6180x_setRegister(VL6180X_SYSRANGE_INTERMEASUREMENT_PERIOD, 0x96);
       VL6180x_setRegister(VL6180X_SYSRANGE_MAX_CONVERGENCE_TIME, 0x32);
 
       // History buffering
@@ -255,12 +256,14 @@ VL6180Lock sensor(VL6180X_ADDRESS, LOCK_DISTANCE, LOCK_TOLERENCE);
  */
 void setup() {
   uint8_t distance;
-  LockState lockState;
-  DoorState doorState;
+  LockState lockState, nextLockState;
+  DoorState doorState, nextDoorState;
+  bool continueSend = true;
+  bool hasSent = false;
 
 #if DEBUG
   DEBUGOUT.begin(115200);
-  delay(1000);
+  delay(500);
   DEBUGOUT.println("ESP8266 powering up.");
 #endif
 
@@ -273,7 +276,6 @@ void setup() {
 #endif
 
   Wire.begin();
-  delay(100);
 
   // Get current lock state from VL6180.
   if (!sensor.sensorRunning()) {
@@ -288,31 +290,57 @@ void setup() {
     delay(100);
   }
 
-  distance = sensor.getLastDistance();
-  lockState = getLockState(distance);
+  // Setup WiFi connection.
+  if (!setupWifi()) {
+    continueSend = false;
+  }
+
+  while (continueSend) {
+    if (hasSent) {
+      lockState = nextLockState;
+      doorState = nextDoorState;
+    } else {
+      // Get current lock / door state.
+      distance = sensor.getLastDistance();
+      lockState = getLockState(distance);
+      doorState = static_cast<DoorState>(digitalRead(GPIO_DOOR_SWITCH));
+      hasSent = true;
+    }
 
 #if DEBUG
-  DEBUGOUT.print("New Lock state detected: ");
-  DEBUGOUT.print(lockState);
-  DEBUGOUT.print(" from distance: ");
-  DEBUGOUT.println(distance);
+    DEBUGOUT.print("Lock state detected: ");
+    DEBUGOUT.print(lockState);
+    DEBUGOUT.print(" from distance: ");
+    DEBUGOUT.println(distance);
+
+    DEBUGOUT.print("Door state detected: ");
+    DEBUGOUT.println(doorState);
 #endif
 
-  // Get current door switch state.
-  doorState = static_cast<DoorState>(digitalRead(GPIO_DOOR_SWITCH));
+    sendStates(lockState, doorState);
+    delay(SLEEP_DELAY);
+
+    distance = sensor.getLastDistance();
+    nextLockState = getLockState(distance);
+    nextDoorState = static_cast<DoorState>(digitalRead(GPIO_DOOR_SWITCH));
+
+    continueSend =
+      ((doorState != nextDoorState) || (lockState != nextLockState));
 
 #if DEBUG
-  DEBUGOUT.print("Door state detected: ");
-  DEBUGOUT.println(doorState);
+    if (continueSend) {
+      DEBUGOUT.println("Updated door state detected, resending.");
+    }
 #endif
+  }
 
-  sendStates(lockState, doorState);
-  sensor.setConfigState(getLockState(sensor.getLastDistance()));
-
-  // Go to sleep.
+  // Setup lock sensor interrupt settings for current state and
+  // go to sleep.
 #if DEBUG
   DEBUGOUT.println("ESP8266 entering low power mode.");
 #endif
+
+  sensor.setConfigState(getLockState(sensor.getLastDistance()));
 
 #if DEBUG_NOSLEEP
   DEBUGOUT.println("Rebooting in 5 seconds.");
@@ -347,10 +375,6 @@ LockState getLockState(uint8_t distance) {
 void sendStates(LockState lockState, DoorState doorState) {
   uint8_t retries = 0;
 
-  if (!setupWifi()) {
-    return;
-  }
-
   client.setServer(MQTT_SERVER, MQTT_PORT);
 
   // Loop until we're connected (or timeout).
@@ -360,14 +384,14 @@ void sendStates(LockState lockState, DoorState doorState) {
     DEBUGOUT.print("Attempting MQTT connection... ");
 #endif
 
-    // Attempt to connect
+    // Attempt to connect to MQTT agent.
     if (client.connect(MQTT_CLIENT_ID, MQTT_CLIENT_USER, MQTT_CLIENT_PASS)) {
 
 #if DEBUG
       DEBUGOUT.println("connected.");
 #endif
 
-      // Once connected, publish an announcement...
+      // Publish annoucements of updated door / lock state.
       snprintf(msg, 10, "%d", lockState);
       client.publish(MQTT_TOPIC_LOCK, msg);
       snprintf(msg, 10, "%d", doorState);

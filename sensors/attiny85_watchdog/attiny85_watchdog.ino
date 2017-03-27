@@ -74,6 +74,7 @@ void loop() {
       digitalWrite(GPIO_ESP_RST, LOW);
       delay(ESP_WAKE_PULSE);
       digitalWrite(GPIO_ESP_RST, HIGH);
+      delay(200);
     }
 
     pinState = false;
