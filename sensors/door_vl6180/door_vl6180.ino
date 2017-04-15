@@ -168,7 +168,7 @@ class VL6180Lock: public VL6180x
           // Watch for change to greater than locked - tolerence
           intConfig = 0x02;
           threshL = 0;
-          threshH = _distance + _threshold;
+          threshH = _distance - _threshold;
       }
 
       delay(10);

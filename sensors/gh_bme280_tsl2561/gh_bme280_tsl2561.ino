@@ -63,8 +63,9 @@ class SensorVals {
 class MqttCreds {
   public:
     char server[40];
-    char port[6];
     char client[15];
+    char portS[6];
+    uint16_t port;
 } mqtt_creds;
 
 bool saveConfig = false;
@@ -106,7 +107,7 @@ void setup() {
 /*
  * Flash the onboard (or external) LED
  */
-void flashLed(uint8_t count, uint8_t period = 100) {
+void flashLed(uint8_t count, uint16_t period = 100) {
 #if GPIO_ENABLE_LED
   for (uint8_t i = 0; i < count; i++) {
     delay(period);
@@ -222,7 +223,7 @@ bool setupWifi() {
   WiFiManagerParameter mqtt_port(
     "port",
     "mqtt port",
-    mqtt_creds.port,
+    mqtt_creds.portS,
     6
   );
 
@@ -257,8 +258,9 @@ bool setupWifi() {
 
   // Gather config values
   strncpy(mqtt_creds.server, mqtt_server.getValue(), 40);
-  strncpy(mqtt_creds.port, mqtt_port.getValue(), 6);
-  strncpy(mqtt_creds.client, mqtt_port.getValue(), 15);
+  strncpy(mqtt_creds.client, mqtt_client.getValue(), 15);
+  strncpy(mqtt_creds.portS, mqtt_port.getValue(), 6);
+  mqtt_creds.port = atol(mqtt_creds.portS);
 
   if (saveConfig) {
     EEPROM.put(EEPROM_CONFIG_ADDR, mqtt_creds);
