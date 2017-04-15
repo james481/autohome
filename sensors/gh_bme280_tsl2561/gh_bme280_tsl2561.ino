@@ -39,6 +39,7 @@
 #define WIFI_GW 192,168,1,1
 #define WIFI_SN 255,255,255,0
 
+#define DEBUG true
 #define DEBUG_NOSLEEP false
 
 #define BME280_ADDRESS 0x77
@@ -46,6 +47,18 @@
 #define TSL2561_ADDRESS 0x39
 #define TSL2561_GAIN 0
 #define TSL2561_TIME 2
+
+/*
+ * Debug logging
+ */
+
+#if DEBUG
+#define DPRINT(...) Serial.print(__VA_ARGS__)
+#define DPRINTL(...) Serial.println(__VA_ARGS__)
+#else
+#define DPRINT(...)
+#define DPRINTL(...)
+#endif
 
 /*
  * Sensor value storage
@@ -89,12 +102,14 @@ char mqttMsg[20];
  */
 void setup() {
 
+  Serial.begin(115200);
+
 #if GPIO_ENABLE_LED
   pinMode(GPIO_LED, OUTPUT);
   digitalWrite(GPIO_LED, LOW);
 #endif
 
-  EEPROM.get(EEPROM_CONFIG_ADDR, mqtt_creds);
+  loadMqttConfig();
 
   if (setupWifi() && setupSensors()) {
     SensorVals sensorVals = readSensors();
@@ -105,15 +120,37 @@ void setup() {
 }
 
 /*
+ * Load MQTT server config from EEPROM
+ */
+void loadMqttConfig() {
+  EEPROM.get(EEPROM_CONFIG_ADDR, mqtt_creds);
+
+  DPRINTL(F("Loaded MQTT config: "));
+  DPRINT(F("Server: "));
+  DPRINTL(mqtt_creds.server);
+  DPRINT(F("Port: "));
+  DPRINTL(mqtt_creds.port);
+  DPRINT(F("Client ID: "));
+  DPRINTL(mqtt_creds.client);
+}
+
+/*
  * Flash the onboard (or external) LED
  */
-void flashLed(uint8_t count, uint16_t period = 100) {
+void flashLed(uint8_t count, uint16_t period = 100, uint8_t repeat = 1) {
 #if GPIO_ENABLE_LED
-  for (uint8_t i = 0; i < count; i++) {
-    delay(period);
-    digitalWrite(GPIO_LED, HIGH);
-    delay(period);
-    digitalWrite(GPIO_LED, LOW);
+  while (repeat > 0) {
+    for (uint8_t i = 0; i < count; i++) {
+      delay(period);
+      digitalWrite(GPIO_LED, HIGH);
+      delay(period);
+      digitalWrite(GPIO_LED, LOW);
+    }
+    repeat--;
+
+    if (repeat > 0) {
+      delay(500);
+    }
   }
 #endif
 }
@@ -132,11 +169,20 @@ SensorVals readSensors() {
 
   if (!validRes) {
     sensorVals.lux = 0;
-    flashLed(8, 250);
+    DPRINTL(F("Invalid Lux reading."));
+    flashLed(3);
   }
 
   sensorVals.tempf = air.readTempF();
   sensorVals.relh = air.readFloatHumidity();
+
+  DPRINTL(F("Read sensor values:"));
+  DPRINT(F("Temp: "));
+  DPRINTL(sensorVals.tempf);
+  DPRINT(F("RelH: "));
+  DPRINTL(sensorVals.relh);
+  DPRINT(F("Lux: "));
+  DPRINTL(sensorVals.lux);
 
   return(sensorVals);
 }
@@ -148,6 +194,7 @@ void sendSensorVals(SensorVals sensorVals) {
   uint8_t retries = 0;
   client.setServer(mqtt_creds.server, mqtt_creds.port);
 
+  DPRINT(F("Connecting to MQTT Server "));
   while ((!client.connected()) && (retries < MQTT_RETRY)) {
     if (client.connect(mqtt_creds.client)) {
       snprintf(mqttMsg, 20, "%0.2f", sensorVals.tempf);
@@ -159,11 +206,18 @@ void sendSensorVals(SensorVals sensorVals) {
       snprintf(mqttMsg, 20, "%0.2f", sensorVals.lux);
       client.publish(MQTT_TOPIC_LUX, mqttMsg);
 
-      flashLed(2, 500);
+      DPRINTL(F(". Sensor value send successful."));
+      flashLed(1, 750);
     } else {
+      DPRINT(F("."));
       retries++;
       delay(2000);
     }
+  }
+
+  if (retries >= MQTT_RETRY) {
+    DPRINTL(F("FAILED"));
+    flashLed(5, 100, 3);
   }
 
   client.loop();
@@ -188,7 +242,8 @@ bool setupSensors() {
   delay(10);
 
   if (!air.begin()) {
-    flashLed(20, 200);
+    DPRINTL(F("BME280 Setup Failed."));
+    flashLed(5, 100, 5);
     return(false);
   }
 
@@ -198,12 +253,15 @@ bool setupSensors() {
   light.begin(TSL2561_ADDRESS);
 
   if (!light.getID(lightID)) {
-    flashLed(20, 200);
+    DPRINTL(F("TSL2561 Setup Failed."));
+    flashLed(5, 100, 5);
     return(false);
   }
 
   light.setTiming(TSL2561_GAIN, TSL2561_TIME, integrationTime);
   light.setPowerUp();
+
+  DPRINTL(F("Sensors configured, waiting for results."));
 
   delay(integrationTime);
   return(true);
@@ -213,6 +271,7 @@ bool setupSensors() {
  * Setup Wifi Connection or config AP
  */
 bool setupWifi() {
+  DPRINTL(F("Configuring WiFi:"));
   WiFiManagerParameter mqtt_server(
     "server",
     "mqtt server",
@@ -250,11 +309,10 @@ bool setupWifi() {
   wifiManager.addParameter(&mqtt_client);
 
   if (!wifiManager.autoConnect(WIFI_APNAME, WIFI_APPASS)) {
-    flashLed(10);
+    DPRINTL(F("WiFi connection failed."));
+    flashLed(5, 100, 2);
     return(false);
   }
-
-  flashLed(5,25);
 
   // Gather config values
   strncpy(mqtt_creds.server, mqtt_server.getValue(), 40);
@@ -262,7 +320,23 @@ bool setupWifi() {
   strncpy(mqtt_creds.portS, mqtt_port.getValue(), 6);
   mqtt_creds.port = atol(mqtt_creds.portS);
 
+  DPRINTL(F("Gathered MQTT config: "));
+  DPRINT(F("Server: "));
+  DPRINTL(mqtt_creds.server);
+  DPRINT(F("Port: "));
+  DPRINTL(mqtt_creds.port);
+  DPRINT(F("Client ID: "));
+  DPRINTL(mqtt_creds.client);
+
+  if (!strlen(mqtt_creds.server)) {
+    DPRINTL(F("Unable to load MQTT server config, resetting."));
+    wifiManager.resetSettings();
+    delay(1000);
+    ESP.restart();
+  }
+
   if (saveConfig) {
+    DPRINTL(F("Saving new MQTT config."));
     EEPROM.put(EEPROM_CONFIG_ADDR, mqtt_creds);
   }
 
@@ -281,9 +355,11 @@ void saveConfigCallback() {
  */
 void sleepNow() {
 #if DEBUG_NOSLEEP
+  DPRINTL(F("Restarting ESP..."));
   delay(5000);
   ESP.restart();
 #else
+  DPRINTL(F("Sleeping ESP..."));
   ESP.deepSleep(SLEEP_PERIOD * 1000000);
 #endif
 }
