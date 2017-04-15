@@ -103,6 +103,7 @@ char mqttMsg[20];
 void setup() {
 
   Serial.begin(115200);
+  EEPROM.begin(sizeof(MqttCreds) + 1);
 
 #if GPIO_ENABLE_LED
   pinMode(GPIO_LED, OUTPUT);
@@ -197,16 +198,16 @@ void sendSensorVals(SensorVals sensorVals) {
   DPRINT(F("Connecting to MQTT Server "));
   while ((!client.connected()) && (retries < MQTT_RETRY)) {
     if (client.connect(mqtt_creds.client)) {
-      snprintf(mqttMsg, 20, "%0.2f", sensorVals.tempf);
+      snprintf(mqttMsg, 20, "%d", lround(sensorVals.tempf));
       client.publish(MQTT_TOPIC_TEMP, mqttMsg);
 
-      snprintf(mqttMsg, 20, "%0.2f", sensorVals.relh);
+      snprintf(mqttMsg, 20, "%d", lround(sensorVals.relh));
       client.publish(MQTT_TOPIC_RELH, mqttMsg);
 
-      snprintf(mqttMsg, 20, "%0.2f", sensorVals.lux);
+      snprintf(mqttMsg, 20, "%d", lround(sensorVals.lux));
       client.publish(MQTT_TOPIC_LUX, mqttMsg);
 
-      DPRINTL(F(". Sensor value send successful."));
+      DPRINTL(F(". DONE"));
       flashLed(1, 750);
     } else {
       DPRINT(F("."));
@@ -315,10 +316,18 @@ bool setupWifi() {
   }
 
   // Gather config values
-  strncpy(mqtt_creds.server, mqtt_server.getValue(), 40);
-  strncpy(mqtt_creds.client, mqtt_client.getValue(), 15);
-  strncpy(mqtt_creds.portS, mqtt_port.getValue(), 6);
-  mqtt_creds.port = atol(mqtt_creds.portS);
+  if (saveConfig) {
+    DPRINTL(F("Saving new MQTT config."));
+
+    strncpy(mqtt_creds.server, mqtt_server.getValue(), 40);
+    strncpy(mqtt_creds.client, mqtt_client.getValue(), 15);
+    strncpy(mqtt_creds.portS, mqtt_port.getValue(), 6);
+    mqtt_creds.port = atol(mqtt_creds.portS);
+
+    EEPROM.put(EEPROM_CONFIG_ADDR, mqtt_creds);
+    delay(10);
+    EEPROM.commit();
+  }
 
   DPRINTL(F("Gathered MQTT config: "));
   DPRINT(F("Server: "));
@@ -333,11 +342,6 @@ bool setupWifi() {
     wifiManager.resetSettings();
     delay(1000);
     ESP.restart();
-  }
-
-  if (saveConfig) {
-    DPRINTL(F("Saving new MQTT config."));
-    EEPROM.put(EEPROM_CONFIG_ADDR, mqtt_creds);
   }
 
   return(true);
