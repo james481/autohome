@@ -23,7 +23,7 @@
 /*
  * Configuration
  */
-#define SLEEP_PERIOD 300
+#define SLEEP_PERIOD 600
 #define GPIO_LED 5
 #define GPIO_ENABLE_LED true
 #define EEPROM_CONFIG_ADDR 0
@@ -33,20 +33,20 @@
 #define MQTT_TOPIC_LUX  "/home/gh1/lux"
 #define MQTT_RETRY 10
 
-#define WIFI_APNAME "greenhouseS"
+#define WIFI_APNAME "homeGH1"
 #define WIFI_APPASS "zNQHe3nQJW"
-#define WIFI_IP 192,168,1,220
+#define WIFI_IP 192,168,1,211
 #define WIFI_GW 192,168,1,1
 #define WIFI_SN 255,255,255,0
 
-#define DEBUG true
+#define DEBUG false
 #define DEBUG_NOSLEEP false
 
 #define BME280_ADDRESS 0x77
 
 #define TSL2561_ADDRESS 0x39
-#define TSL2561_GAIN 0
-#define TSL2561_TIME 2
+#define TSL2561_GAIN 1
+#define TSL2561_TIME 0
 
 /*
  * Debug logging
@@ -233,8 +233,8 @@ bool setupSensors() {
   // Setup BME280
   air.settings.commInterface = I2C_MODE;
   air.settings.I2CAddress = BME280_ADDRESS;
-  air.settings.runMode = 3;
-  air.settings.tStandby = 0;
+  air.settings.runMode = 1;
+  air.settings.tStandby = 5;
   air.settings.filter = 0;
   air.settings.tempOverSample = 1;
   air.settings.pressOverSample = 1;
@@ -358,6 +358,10 @@ void saveConfigCallback() {
  * Sleep (or restart) after sending.
  */
 void sleepNow() {
+  DPRINTL(F("Powering down sensors..."));
+  light.setPowerDown();
+  delay(10);
+
 #if DEBUG_NOSLEEP
   DPRINTL(F("Restarting ESP..."));
   delay(5000);
